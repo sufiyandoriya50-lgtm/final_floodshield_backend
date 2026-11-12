@@ -43,14 +43,15 @@ def validate_coordinates(latitude, longitude):
         raise ValueError("Longitude must be between -180 and 180")
 
 
-"""it  
-gets actual weather data from external source 
+"""it
+gets actual weather data from external source
 Rejects invalid locations before making requests
 Timeout handling,
 Identifies network failures,
 Detects unsuccessful API responses,
 Rejects invalid responses,
 Prevents incomplete weather records,    """
+# Fetches and validates current weather data from Open-Meteo.
 
 
 def get_current_weather(latitude, longitude):
@@ -104,14 +105,22 @@ def get_current_weather(latitude, longitude):
 
     # Validate that the API returned a usable current weather object.
     current = data.get("current")
-    
+
     if not isinstance(current, dict) or not current:
         raise ValueError("Weather API response is missing current weather data")
-    
-    # Open-Meteo reports the precipitation measurement interval in seconds.
+
+   # Validate the precipitation measurement interval when supplied.
     interval_seconds = current.get("interval")
-    if not isinstance(current, dict):
-        raise ValueError("Current weather data is missing or invalid")
+
+    if interval_seconds is not None:
+        if (
+            isinstance(interval_seconds, bool)
+            or not isinstance(interval_seconds, int)
+            or interval_seconds <= 0
+        ):
+            raise ValueError(
+                "Invalid precipitation measurement interval"
+            )
     # STEP 1: Check required fields
     required_fields = ["temperature_2m", "precipitation", "wind_speed_10m", "time"]
 
@@ -134,7 +143,7 @@ def get_current_weather(latitude, longitude):
 
         if value < 0 and field != "temperature_2m":
             raise ValueError(f"{field} cannot be negative")
-        
+
     # Validate weather timestamp
     recorded_at = current["time"]
 
@@ -146,13 +155,12 @@ def get_current_weather(latitude, longitude):
     except ValueError as error:
         raise ValueError("Invalid weather timestamp format") from error
     return {
-        "latitude": latitude,
-        "longitude": longitude,
-        "temperature_c": current["temperature_2m"],
-        "rainfall_mm": current["precipitation"],
-        "precipitation_interval_seconds": interval_seconds,
-        "wind_speed_kmh": current["wind_speed_10m"],
-        "recorded_at": current["time"],
-        "recorded_at": recorded_at,
-        "source": "Open-Meteo",
-    }
+    "latitude": latitude,
+    "longitude": longitude,
+    "temperature_c": current["temperature_2m"],
+    "rainfall_mm": current["precipitation"],
+    "precipitation_interval_seconds": interval_seconds,
+    "wind_speed_kmh": current["wind_speed_10m"],
+    "recorded_at": recorded_at,
+    "source": "Open-Meteo",
+}

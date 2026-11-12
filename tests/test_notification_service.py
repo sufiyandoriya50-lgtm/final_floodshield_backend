@@ -52,11 +52,10 @@ def test_notification_sent_successfully(app, test_user, monkeypatch):
     with app.app_context():
         device = DeviceToken(
             user_id=test_user,
-            fid="test-firebase-device-token",
+            fid="test-firebase-installation-id",
             platform="android",
             is_active=True
         )
-
         db.session.add(device)
         db.session.commit()
 
@@ -92,11 +91,10 @@ def test_unregistered_device_token_is_deactivated(
     with app.app_context():
         device = DeviceToken(
             user_id=test_user,
-            fid="invalid-device-token",
+            fid="test-firebase-installation-id",
             platform="android",
             is_active=True
         )
-
         db.session.add(device)
         db.session.commit()
 
@@ -131,11 +129,10 @@ def test_notification_remains_pending_without_firebase(app, test_user, monkeypat
     with app.app_context():
         device = DeviceToken(
             user_id=test_user,
-            fid="test-pending-device-token",
+            fid="test-firebase-installation-id",
             platform="android",
             is_active=True
         )
-
         db.session.add(device)
         db.session.commit()
 
@@ -189,3 +186,229 @@ def test_notification_rejects_nonexistent_user(app):
                 title="Flood Alert",
                 message="Test message"
             )
+
+# Tests rejection of invalid user ID types and values.
+@pytest.mark.parametrize(
+    "invalid_user_id",
+    [True, 0, -1, "1", 1.5, None],
+)
+def test_rejects_invalid_user_id(app, invalid_user_id):
+    with app.app_context():
+        with pytest.raises(ValueError, match="valid user ID"):
+            send_notification(
+                user_id=invalid_user_id,
+                title="Flood Alert",
+                message="Test message",
+            )
+
+# Tests validation of notification fields and optional values.
+@pytest.mark.parametrize(
+    "notification_data, expected_message",
+    [
+        ({"title": "A" * 151}, "title cannot exceed 150"),
+        ({"message": 123}, "message is required"),
+        ({"notification_type": ""}, "type is required"),
+        ({"notification_type": 123}, "type is required"),
+        ({"deduplication_key": 123}, "must be a string"),
+        ({"deduplication_key": "   "}, "cannot be empty"),
+        ({"deduplication_key": "A" * 101}, "cannot exceed 100"),
+        ({"latitude": True}, "must be numeric"),
+        ({"latitude": "23.02"}, "must be numeric"),
+        ({"latitude": float("inf")}, "must be finite"),
+        ({"longitude": float("nan")}, "must be finite"),
+    ],
+)
+
+
+def test_rejects_invalid_notification_fields(
+    app,
+    test_user,
+    notification_data,
+    expected_message,
+):
+    with app.app_context():
+        data = {
+            "user_id": test_user,
+            "title": "Flood Alert",
+            "message": "Test message",
+        }
+
+        data.update(notification_data)
+
+        with pytest.raises(ValueError, match=expected_message):
+            send_notification(**data)
+
+# Tests rollback when saving a new notification fails.
+def test_notification_creation_rolls_back_on_database_error(
+    app,
+    test_user,
+    monkeypatch,
+):
+    with app.app_context():
+        def fail_commit():
+            raise RuntimeError("Database commit failed")
+
+        monkeypatch.setattr(db.session, "commit", fail_commit)
+
+        with pytest.raises(RuntimeError, match="Database commit failed"):
+            send_notification(
+                user_id=test_user,
+                title="Flood Alert",
+                message="Test message",
+            )
+
+        db.session.rollback()
+
+        assert Notification.query.filter_by(
+            user_id=test_user,
+            title="Flood Alert",
+        ).count() == 0
+
+# Tests that active devices without Firebase Installation IDs are excluded.
+def test_legacy_token_only_devices_are_not_used(
+    app,
+    test_user,
+    monkeypatch,
+):
+    with app.app_context():
+        device = DeviceToken(
+            user_id=test_user,
+            token="legacy-registration-token",
+            fid=None,
+            platform="android",
+            is_active=True,
+        )
+
+        db.session.add(device)
+        db.session.commit()
+
+        def firebase_should_not_initialize():
+            raise AssertionError(
+                "Firebase should not initialize without an FID device"
+            )
+
+        monkeypatch.setattr(
+            "app.services.notification_service.firebase_admin.get_app",
+            firebase_should_not_initialize,
+        )
+
+        notification = send_notification(
+            user_id=test_user,
+            title="Flood Alert",
+            message="Test message",
+        )
+
+        assert notification.delivery_status == "no_devices"
+
+# Tests partial delivery when one device fails and another succeeds.
+def test_notification_partial_delivery(
+    app,
+    test_user,
+    monkeypatch,
+):
+    with app.app_context():
+        devices = [
+            DeviceToken(
+                user_id=test_user,
+                fid="firebase-installation-one",
+                platform="android",
+                is_active=True,
+            ),
+            DeviceToken(
+                user_id=test_user,
+                fid="firebase-installation-two",
+                platform="ios",
+                is_active=True,
+            ),
+        ]
+
+        db.session.add_all(devices)
+        db.session.commit()
+
+        monkeypatch.setattr(
+            "app.services.notification_service.firebase_admin.get_app",
+            lambda: object(),
+        )
+
+        send_count = 0
+
+        def send_with_one_failure(firebase_message, app=None):
+            nonlocal send_count
+            send_count += 1
+
+            if send_count == 1:
+                raise RuntimeError("Temporary Firebase error")
+
+            return "mock-message-id"
+
+        monkeypatch.setattr(
+            "app.services.notification_service.messaging.send",
+            send_with_one_failure,
+        )
+
+        notification = send_notification(
+            user_id=test_user,
+            title="Flood Alert",
+            message="Test partial delivery",
+        )
+
+        assert send_count == 2
+        assert notification.delivery_status == "partial"
+
+# Tests rollback when saving the final delivery status fails.
+def test_delivery_status_commit_failure_rolls_back(
+    app,
+    test_user,
+    monkeypatch,
+):
+    with app.app_context():
+        device = DeviceToken(
+            user_id=test_user,
+            fid="firebase-installation-commit-test",
+            platform="android",
+            is_active=True,
+        )
+
+        db.session.add(device)
+        db.session.commit()
+
+        monkeypatch.setattr(
+            "app.services.notification_service.firebase_admin.get_app",
+            lambda: object(),
+        )
+
+        monkeypatch.setattr(
+            "app.services.notification_service.messaging.send",
+            lambda firebase_message, app=None: "mock-message-id",
+        )
+
+        original_commit = db.session.commit
+        commit_count = 0
+
+        def fail_second_commit():
+            nonlocal commit_count
+            commit_count += 1
+
+            if commit_count == 2:
+                raise RuntimeError("Delivery status commit failed")
+
+            return original_commit()
+
+        monkeypatch.setattr(
+            db.session,
+            "commit",
+            fail_second_commit,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="Delivery status commit failed",
+        ):
+            send_notification(
+                user_id=test_user,
+                title="Flood Alert",
+                message="Test message",
+            )
+
+        assert commit_count == 2
+        db.session.rollback()

@@ -2,7 +2,8 @@ import io
 
 import pytest
 from flask_jwt_extended import create_access_token
-
+from io import BytesIO
+from pathlib import Path
 from app import create_app
 from app.config import TestingConfig
 from app.extensions import db
@@ -119,3 +120,85 @@ def test_import_rejects_non_csv_file(client, user_tokens):
     )
 
     assert response.status_code == 400
+
+# Tests that an administrator cannot import without uploading a file.
+def test_import_historical_floods_without_file(client, user_tokens):
+    response = client.post(
+        "/api/admin/historical-floods/import",
+        headers={
+            "Authorization": f"Bearer {user_tokens['admin']}"
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json["status"] == "error"
+
+
+# Tests that CSV import validation errors return HTTP 400.
+def test_import_historical_floods_value_error(
+    app, client, user_tokens, monkeypatch
+):
+    def mock_import(file_path):
+        raise ValueError("Invalid CSV content")
+
+    monkeypatch.setattr(
+        "app.routes.historical_floods.import_historical_flood_csv",
+        mock_import,
+    )
+
+    response = client.post(
+        "/api/admin/historical-floods/import",
+        headers={
+            "Authorization": f"Bearer {user_tokens['admin']}"
+        },
+        data={
+            "file": (BytesIO(b"invalid,csv"), "invalid.csv")
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    assert response.json["message"] == "Invalid CSV content"
+
+    upload_directory = (
+        Path(app.instance_path)
+        / "uploads"
+        / "historical_floods"
+    )
+
+    assert not (upload_directory / "invalid.csv").exists()
+
+
+# Tests that unexpected import errors return HTTP 500 and remove the temporary file.
+def test_import_historical_floods_unexpected_error(
+    app, client, user_tokens, monkeypatch
+):
+    def mock_import(file_path):
+        raise RuntimeError("Database failure")
+
+    monkeypatch.setattr(
+        "app.routes.historical_floods.import_historical_flood_csv",
+        mock_import,
+    )
+
+    response = client.post(
+        "/api/admin/historical-floods/import",
+        headers={
+            "Authorization": f"Bearer {user_tokens['admin']}"
+        },
+        data={
+            "file": (BytesIO(b"valid,csv"), "temporary.csv")
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 500
+    assert response.json["status"] == "error"
+
+    upload_directory = (
+        Path(app.instance_path)
+        / "uploads"
+        / "historical_floods"
+    )
+
+    assert not (upload_directory / "temporary.csv").exists()

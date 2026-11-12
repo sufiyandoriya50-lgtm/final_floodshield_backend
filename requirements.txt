@@ -27,9 +27,12 @@ pytest==9.2.0
 pytest-cov==7.1.0
 python-dotenv==1.2.4
 requests==2.34.2
-SQLAlchemy==2.1.8
+SQLAlchemy==2.0.57
 typing_extensions==4.16.0
 tzdata==2026.6
 urllib3==2.8.0
 Werkzeug==3.1.9
 firebase-admin==7.7.0
+Flask-Limiter==4.1.1
+redis==8.1.0
+psycopg2-binary-2.9.13

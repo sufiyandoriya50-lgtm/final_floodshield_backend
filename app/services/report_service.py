@@ -1,7 +1,14 @@
+import math
+
+from sqlalchemy import or_
+
 from app.extensions import db
 from app.models.flood_report import FloodReport
 from app.models.moderation_history import ModerationHistory
 from app.utils.geo import calculate_distance_km
+
+
+# Create and persist a new flood report.
 def create_flood_report(
     user_id,
     latitude,
@@ -30,8 +37,7 @@ def create_flood_report(
         db.session.rollback()
         raise
 
-"""to get all available flood reports by status filter and also if specific reports of areaa is needed by km radius and pagination added"""
-
+# Retrieve flood reports with visibility, date, location, and pagination filters.
 def get_all_flood_reports(
     status=None,
     latitude=None,
@@ -40,10 +46,23 @@ def get_all_flood_reports(
     page=1,
     per_page=20,
     created_after=None,
-    created_before=None
-    
+    created_before=None,
+    visible_to_user_id=None,
+    include_all=False
 ):
     query = FloodReport.query
+
+    # Restrict citizens to their own reports and publicly visible verified reports.
+    if not include_all:
+        if visible_to_user_id is None:
+            raise ValueError("A user ID is required to retrieve visible reports")
+
+        query = query.filter(
+            or_(
+                FloodReport.user_id == visible_to_user_id,
+                FloodReport.status == "verified"
+            )
+        )
     # Filter reports by creation date.
     if created_after is not None:
        query = query.filter(FloodReport.created_at >= created_after)
@@ -55,20 +74,81 @@ def get_all_flood_reports(
     if status:
         query = query.filter_by(status=status)
 
-    # Sort newest reports first.
-    query = query.order_by(FloodReport.created_at.desc())
-
+    # Sort newest reports first, using report ID as a stable tie-breaker.
+    query = query.order_by(
+        FloodReport.created_at.desc(),
+        FloodReport.id.desc()
+    )
     # Check whether location filtering is requested.
     location_filter = (
         latitude is not None
         and longitude is not None
         and radius_km is not None
     )
-
     if location_filter:
-        # Load reports matching the status filter.
-        all_reports = query.all()
+        # Calculate a conservative geographic bounding box.
+        earth_radius_km = 6371.0
+        angular_radius = radius_km / earth_radius_km
 
+        center_lat = math.radians(latitude)
+        center_lon = math.radians(longitude)
+
+        min_lat = max(
+            -math.pi / 2,
+            center_lat - angular_radius
+        )
+        max_lat = min(
+            math.pi / 2,
+            center_lat + angular_radius
+        )
+
+        # Filter latitude in the database first.
+        query = query.filter(
+            FloodReport.latitude >= math.degrees(min_lat),
+            FloodReport.latitude <= math.degrees(max_lat)
+        )
+
+        # Apply longitude filtering unless the bounding box reaches a pole.
+        if min_lat > -math.pi / 2 and max_lat < math.pi / 2:
+            max_lon_delta = math.asin(
+                min(
+                    1.0,
+                    math.sin(angular_radius) / math.cos(center_lat)
+                )
+            )
+
+            min_lon = center_lon - max_lon_delta
+            max_lon = center_lon + max_lon_delta
+
+            # Handle bounding boxes crossing the International Date Line.
+            if min_lon < -math.pi:
+                query = query.filter(
+                    or_(
+                        FloodReport.longitude >= math.degrees(
+                            min_lon + 2 * math.pi
+                        ),
+                        FloodReport.longitude <= math.degrees(max_lon)
+                    )
+                )
+
+            elif max_lon > math.pi:
+                query = query.filter(
+                    or_(
+                        FloodReport.longitude >= math.degrees(min_lon),
+                        FloodReport.longitude <= math.degrees(
+                            max_lon - 2 * math.pi
+                        )
+                    )
+                )
+
+            else:
+                query = query.filter(
+                    FloodReport.longitude >= math.degrees(min_lon),
+                    FloodReport.longitude <= math.degrees(max_lon)
+                )
+
+        # Load only reports inside the geographic bounding box.
+        all_reports = query.all()
         # Calculate geographic distance for each report.
         filtered_reports = []
 

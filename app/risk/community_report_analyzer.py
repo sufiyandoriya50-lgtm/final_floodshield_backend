@@ -193,7 +193,7 @@ def analyze_community_reports(
         round(average_depth_score * count_multiplier)
     )
 
-    if final_score < 25:
+    if final_score <= 25:
         category = "low"
     elif final_score < 50:
         category = "moderate"

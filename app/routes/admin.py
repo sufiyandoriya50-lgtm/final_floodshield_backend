@@ -95,7 +95,6 @@ def get_admin_report_details(report_id):
         "reporter": {
             "id": report.user.id,
             "name": report.user.name,
-            "email": report.user.email,
         },
         "media": get_report_media(report.id),
     }
